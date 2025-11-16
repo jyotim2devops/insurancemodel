@@ -39,9 +39,11 @@ class SimpleStorageService:
     @staticmethod
     def read_object(object_name, decode: bool = True, make_readable: bool = False) -> Union[StringIO, str]:
         """
-        Reads the specified S3 object content.
+        Reads the specified S3 object content. Expects an object that supports .get()
+        (i.e. boto3 s3.Object).
         """
         try:
+            # If user accidentally passed an ObjectSummary or list, normalize before use is recommended
             func = (
                 lambda: object_name.get()["Body"].read().decode()
                 if decode else object_name.get()["Body"].read()
@@ -65,26 +67,25 @@ class SimpleStorageService:
 
     def get_file_object(self, filename: str, bucket_name: str):
         """
-        Retrieves **a single S3 object**, never a list.
-
-        Fixes error:
-            'list' object has no attribute 'get'
+        Retrieve a single boto3 s3.Object corresponding to the first match for the given prefix.
+        Always returns an s3.Object (has .get()), never a list or ObjectSummary.
         """
         logging.info("Entered get_file_object")
 
         try:
             bucket = self.get_bucket(bucket_name)
-            file_objects = [obj for obj in bucket.objects.filter(Prefix=filename)]
+            summaries = [obj for obj in bucket.objects.filter(Prefix=filename)]
 
-            if len(file_objects) == 0:
-                raise MyException(
-                    f"File '{filename}' not found in bucket '{bucket_name}'",
-                    sys
-                )
+            if not summaries:
+                raise MyException(f"File '{filename}' not found in bucket '{bucket_name}'", sys)
 
-            # Always return first object (never return list)
+            # Use the first summary's key to create a full s3.Object (this object supports .get())
+            key = summaries[0].key
+            s3_object = self.s3_resource.Object(bucket_name, key)
+
+            logging.info(f"Found S3 object: s3://{bucket_name}/{key}")
             logging.info("Exited get_file_object")
-            return file_objects[0]
+            return s3_object
 
         except Exception as e:
             raise MyException(e, sys)
@@ -95,6 +96,7 @@ class SimpleStorageService:
         """
         try:
             model_file = model_dir + "/" + model_name if model_dir else model_name
+            # get_file_object now returns an s3.Object (has .get())
             file_object = self.get_file_object(model_file, bucket_name)
             model_binary = self.read_object(file_object, decode=False)
             model = pickle.loads(model_binary)
